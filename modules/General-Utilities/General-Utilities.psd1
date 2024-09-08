@@ -7,7 +7,12 @@
     Copyright         = '(c) 2023 Stark Botha. All rights reserved.'
     Description       = 'A module containing general utility functions.'
     PowerShellVersion = '5.1'
-    FunctionsToExport = @('Remove-ItemSafely')
+    FunctionsToExport = @(
+        'Remove-ItemSafely',
+        'New-Guid',
+        'Get-ModuleText',
+        'Get-CustomFunctions'
+    )
     CmdletsToExport   = @()
     VariablesToExport = '*'
     AliasesToExport   = @()

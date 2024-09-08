@@ -7,10 +7,10 @@
     Copyright         = '(c) 2023 Stark Botha. All rights reserved.'
     Description       = 'Provides shortcuts for navigating to common directories.'
     PowerShellVersion = '5.1'
-    FunctionsToExport = @('Remove-ItemSafely')
+    FunctionsToExport = @('Use-Dev', 'Use-Avenu', 'Use-BpWeb', 'Use-BpApi', 'Use-OrgApi', 'Use-TasksApi', 'Use-Nvim')
     CmdletsToExport   = @()
     VariablesToExport = '*'
-    AliasesToExport   = @()
+    AliasesToExport   = @('godev', 'goavenu', 'gobpweb', 'gobpapi', 'goorg', 'gotasks', 'govim')
     PrivateData       = @{
         PSData = @{
             Tags       = @('Utility', 'FileSystem')

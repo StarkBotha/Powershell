@@ -2,7 +2,7 @@
     RootModule        = 'MyShortcuts.psm1'
     ModuleVersion     = '1.0.0'
     GUID              = '9f2d182d-7972-4f07-88c0-8e21e9f2005c'
-    Author            = 'Your Name'
+    Author            = 'Stark Botha'
     CompanyName       = 'Stark Botha'
     Copyright         = '(c) 2023 Stark Botha. All rights reserved.'
     Description       = 'Provides shortcuts for navigating to common directories.'

@@ -17,7 +17,10 @@
         'Remove-Branches',
         'Get-UntrackedBranches',
         'Get-UnmergedBranches',
-        'Show-Diff'
+        'Show-Diff',
+        'Get-Repo',
+        'New-PR',
+        'New-Issue'
     )
     CmdletsToExport   = @()
     VariablesToExport = '*'

@@ -162,7 +162,7 @@ function New-MergeBranch {
         # Check for uncommitted or unstaged changes
         $status = git status --porcelain
         if ($status) {
-            throw "Your branch has uncommitted or unstaged changes. Please commit or stash them before proceeding.kek"
+            throw "Your branch has uncommitted or unstaged changes. Please commit or stash them before proceeding."
         }
 
         # Check for unpushed commits
@@ -228,6 +228,45 @@ function New-MergeBranch {
             if ($LASTEXITCODE -ne 0) { throw "Failed to push new branch $newBranchName." }
 
             Write-Output "Successfully created and pushed merge branch: $newBranchName"
+
+            # Create a new PR
+            $projectType = Get-ProjectType
+            $prTitle = "Merge $originalBranch into $TargetBranch"
+            $prBody = "This PR merges changes from $originalBranch into $TargetBranch."
+
+            $prResult = New-PR -Title $prTitle -ToBranch $TargetBranch -Body $prBody -ProjectType $projectType
+
+            # Extract PR URL from the result
+            $prUrl = $prResult -replace "Pull request created successfully. PR URL: "
+
+            # Extract JIRA key from the original branch name
+            $jiraKey = if ($originalBranch -match '^Bug/([A-Z]+-\d+)') {
+                $matches[1]
+            }
+            elseif ($originalBranch -match '^([A-Z]+-\d+)') {
+                $matches[0]
+            }
+            else {
+                $null
+            }
+
+            if (-not $jiraKey) {
+                Write-Warning "Could not extract a valid JIRA key from the branch name. Skipping JIRA update."
+            }
+            else {
+                # Append PR information to JIRA issue description
+                $currentDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                $prInfo = @"
+PR: $currentDate
+FROM: $newBranchName
+TO: $TargetBranch
+URL: $prUrl
+"@
+
+                Add-TextToJiraDescription -IssueKey $jiraKey -TextToAdd $prInfo
+
+                Write-Output "PR information added to JIRA issue $jiraKey"
+            }
         }
         catch {
             Write-Error $_.Exception.Message
@@ -763,6 +802,377 @@ function Show-Diff {
     }
 }
 
+<#
+.SYNOPSIS
+    Gets the name of the current Git repository.
+.DESCRIPTION
+    This function retrieves the name of the current Git repository from the remote origin URL.
+    It works with both HTTPS and SSH remote URLs.
+.EXAMPLE
+    Get-Repo
+    Returns: "my-repo-name"
+.OUTPUTS
+    System.String
+    Returns the repository name as a string, or $null if it can't be determined.
+.NOTES
+    Requires Git to be installed and accessible in the system PATH.
+    This function depends on Test-IsGitRepository.
+#>
+function Get-Repo {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    begin {
+        Write-Verbose "Starting to fetch Git repository name"
+        if (-not (Test-IsGitRepository)) {
+            Write-Error "Not in a Git repository. Aborting."
+            return $null
+        }
+    }
+
+    process {
+        try {
+            $remoteUrl = git config --get remote.origin.url
+            if (-not $remoteUrl) {
+                Write-Error "No remote origin URL found."
+                return $null
+            }
+
+            Write-Verbose "Remote URL: $remoteUrl"
+
+            $repoName = $remoteUrl | 
+            Select-String -Pattern '(?:https://github\.com/|git@github\.com:)(?:[^/]+)/(.+?)(?:\.git)?$' | 
+            ForEach-Object { $_.Matches.Groups[1].Value }
+
+            if (-not $repoName) {
+                Write-Error "Failed to extract repository name from the remote URL."
+                return $null
+            }
+
+            Write-Verbose "Repository name: $repoName"
+            return $repoName
+        }
+        catch {
+            Write-Error "An error occurred while fetching the repository name: $_"
+            return $null
+        }
+    }
+
+    end {
+        Write-Verbose "Completed fetching Git repository name"
+    }
+}
+
+<#
+.SYNOPSIS
+    Gets a list of reviewers based on the project type.
+.DESCRIPTION
+    This function returns a predefined list of reviewers for different project types.
+.PARAMETER ProjectType
+    The type of project. Valid values are "BpWeb", "BpApi", and "OrgApi".
+.EXAMPLE
+    Get-Reviewers -ProjectType "BpWeb"
+    Returns a list of reviewers for the BpWeb project.
+.OUTPUTS
+    System.String[]
+    Returns an array of reviewer names.
+.NOTES
+    The reviewer lists are hardcoded in this function and should be updated as needed.
+#>
+function Get-Reviewers {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("BpWeb", "BpApi", "OrgApi", "Test")]
+        [string]$ProjectType
+    )
+
+    switch ($ProjectType) {
+        "BpWeb" {
+            return @("rorybeling", "rayleneavenu", "ulrich-jvr")
+        }
+        "BpApi" {
+            return @("rorybeling", "ulrich-jvr", "Dietrich-H2", "Zeliard-64", "neljaj")
+        }
+        "OrgApi" {
+            return @("rorybeling", "timothd", "andrei-sadagurschi", "GertRouxAvenu")
+        }
+        "Test" {
+            return @("rorybeling")  # This is now explicitly an array
+        }
+        default {
+            Write-Error "Invalid project type specified."
+            return @()
+        }
+    }
+}
+
+function New-PR {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$ToBranch,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$Body = "",
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("BpWeb", "BpApi", "OrgApi", "Test")]
+        [string]$ProjectType,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NoDebug,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NoConfirm
+    )
+
+    begin {
+        if (-not $NoDebug) { Write-Host "Debug: Starting New-PR function" -ForegroundColor Yellow }
+
+        if (-not (Test-IsGitRepository)) {
+            throw "Not in a Git repository."
+        }
+        if (-not $NoDebug) { Write-Host "Debug: Confirmed current directory is a Git repository" -ForegroundColor Yellow }
+
+        # Get owner and token from environment variables
+        $RepoOwner = [Environment]::GetEnvironmentVariable("GITHUB_OWNER", "User")
+        $Token = [Environment]::GetEnvironmentVariable("GITHUB_PAT", "User")
+
+        if (-not $NoDebug) { 
+            Write-Host "Debug: RepoOwner: $RepoOwner" -ForegroundColor Yellow
+            Write-Host "Debug: Token: [REDACTED]" -ForegroundColor Yellow
+        }
+
+        if (-not $RepoOwner -or -not $Token) {
+            throw "GitHub owner or PAT not found in environment variables. Please set GITHUB_OWNER and GITHUB_PAT."
+        }
+    }
+
+    process {
+        try {
+            $RepoName = Get-Repo
+            if (-not $NoDebug) { Write-Host "Debug: RepoName: $RepoName" -ForegroundColor Yellow }
+
+            if (-not $RepoName) {
+                throw "Failed to determine the repository name."
+            }
+
+            $FromBranch = Get-GitCurrentBranch
+            if (-not $FromBranch) {
+                throw "Failed to determine the current branch."
+            }
+            if (-not $NoDebug) { Write-Host "Debug: FromBranch: $FromBranch" -ForegroundColor Yellow }
+
+            $apiUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/pulls"
+            if (-not $NoDebug) { Write-Host "Debug: API URL: $apiUrl" -ForegroundColor Yellow }
+            
+            $headers = @{
+                Authorization = "token $Token"
+                Accept        = "application/vnd.github.v3+json"
+            }
+            if (-not $NoDebug) { Write-Host "Debug: Headers set (token redacted)" -ForegroundColor Yellow }
+            
+            $bodyContent = @{
+                title = $Title
+                head  = $FromBranch
+                base  = $ToBranch
+                body  = $Body
+            }
+
+            if (-not $NoDebug) {
+                Write-Host "Debug: Title: $Title" -ForegroundColor Yellow
+                Write-Host "Debug: ToBranch: $ToBranch" -ForegroundColor Yellow
+                Write-Host "Debug: Body: $Body" -ForegroundColor Yellow
+            }
+
+            $Reviewers = Get-Reviewers -ProjectType $ProjectType
+            if (-not $NoDebug) {
+                Write-Host "Debug: ProjectType: $ProjectType" -ForegroundColor Yellow
+                Write-Host "Debug: Reviewers: $($Reviewers -join ', ')" -ForegroundColor Yellow
+            }
+
+            if ($Reviewers.Count -gt 0) {
+                $bodyContent.Add("reviewers", $Reviewers)
+            }
+
+            $bodyJson = $bodyContent | ConvertTo-Json
+            if (-not $NoDebug) { Write-Host "Debug: Request body created" -ForegroundColor Yellow }
+
+            if (-not $NoConfirm) {
+                $confirmation = Read-Host "Are you sure you want to create this PR? (Y/N)"
+                if ($confirmation -ne 'Y') {
+                    Write-Host "PR creation cancelled."
+                    return
+                }
+            }
+
+            $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $bodyJson -ContentType "application/json"
+            if (-not $NoDebug) { Write-Host "Debug: Pull request created. Response received." -ForegroundColor Yellow }
+            Write-Output "Pull request created successfully. PR URL: $($response.html_url)"
+
+            if ($Reviewers.Count -gt 0 -and -not $response.requested_reviewers) {
+                $reviewersUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/pulls/$($response.number)/requested_reviewers"
+                if (-not $NoDebug) { Write-Host "Debug: Adding reviewers. URL: $reviewersUrl" -ForegroundColor Yellow }
+                $reviewersBody = @{
+                    reviewers = @($Reviewers)  # Ensure reviewers is an array
+                } | ConvertTo-Json
+
+                try {
+                    $reviewersResponse = Invoke-RestMethod -Uri $reviewersUrl -Method Post -Headers $headers -Body $reviewersBody -ContentType "application/json"
+                    if (-not $NoDebug) { Write-Host "Debug: Reviewers added successfully" -ForegroundColor Yellow }
+                    Write-Output "Reviewers added successfully."
+                }
+                catch {
+                    Write-Error "Failed to add reviewers: $_"
+                    if (-not $NoDebug) { 
+                        Write-Host "Debug: Reviewers body sent:" -ForegroundColor Yellow
+                        Write-Host $reviewersBody -ForegroundColor Yellow
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Error "Failed to create pull request or add reviewers: $_"
+        }
+    }
+
+    end {
+        if (-not $NoDebug) { Write-Host "Debug: New-PR function completed" -ForegroundColor Yellow }
+    }
+}
+
+<#
+.SYNOPSIS
+    Create a branch that corresponds to a JIRA issue, use the JIRA issue to 
+    name the branch, then insert the branch URL into the JIRA issue description.
+.DESCRIPTION
+    This function creates a new branch based on a JIRA issue key, names the branch
+    using the JIRA issue summary and type, pushes the branch to GitHub, and updates 
+    the JIRA issue description with the new branch URL.
+.EXAMPLE
+    New-Issue -JiraKey "PROJ-123" -FromBranch "develop"
+    Creates a new branch for JIRA issue PROJ-123, branching from 'develop'.
+.PARAMETER JiraKey
+    The JIRA issue key (e.g., "PROJ-123").
+.PARAMETER FromBranch
+    The branch from which the new branch will be created.
+#>
+function New-Issue {
+    [CmdletBinding()]    
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$JiraKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FromBranch
+    )
+    
+    begin {
+        if (-not (Test-IsGitRepository)) {
+            throw "Not in a Git repository."
+        }
+
+        # Make sure the FromBranch exists
+        if (-not (git rev-parse --verify $FromBranch 2>$null)) {
+            throw "The specified FromBranch '$FromBranch' does not exist."
+        }
+
+        # Check for uncommitted or unstaged changes
+        $status = git status --porcelain
+        if ($status) {
+            throw "Your branch has uncommitted or unstaged changes. Please commit or stash them before proceeding."
+        }
+
+        # Change branch to FromBranch
+        git checkout $FromBranch
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to switch to branch '$FromBranch'."
+        }
+    }
+    
+    process {
+        try {
+            $jiraIssue = Get-JiraIssueObject -IssueKey $JiraKey
+            if (-not $jiraIssue) {
+                throw "Failed to fetch JIRA issue $JiraKey."
+            }
+        
+            $issueSubject = $jiraIssue.summary
+            $issueType = $jiraIssue.issuetype.name
+        
+            # Determine the branch prefix and structure based on issue type
+            if ($issueType -eq "Bug") {
+                $branchPrefix = "Bug/$($JiraKey.ToUpper())/"
+                $branchName = "$branchPrefix$($issueSubject -replace '[^\w\-]', '_')"
+            }
+            else {
+                $branchPrefix = "$($JiraKey.ToUpper())/"
+                $branchName = "$branchPrefix$($issueSubject -replace '[^\w\-]', '_')"
+            }
+
+            # Convert the part after the prefix to lowercase
+            $branchName = $branchPrefix + $branchName.Substring($branchPrefix.Length).ToLower()
+        
+            # Create and checkout the new branch
+            git checkout -b $branchName
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to create and checkout new branch '$branchName'."
+            }
+        
+            # Push new branch to GitHub
+            git push -u origin $branchName
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to push new branch '$branchName' to remote."
+            }
+        
+            # Get the GitHub URL of the newly created branch
+            $repoName = Get-Repo
+            $repoOwner = [Environment]::GetEnvironmentVariable("GITHUB_OWNER", "User")
+            $branchUrl = "https://github.com/$repoOwner/$repoName/tree/$branchName"
+        
+            # Update JIRA issue description
+            Add-TextToJiraDescription -IssueKey $JiraKey -TextToAdd "`n$repoName Branch: $branchUrl`nBranched from: $FromBranch"
+        
+            Write-Host "Branch '$branchName' created and pushed successfully." -ForegroundColor Green
+            Write-Host "JIRA issue $JiraKey updated with branch information." -ForegroundColor Green
+        }
+        catch {
+            Write-Error "An error occurred: $_"
+            # Attempt to clean up if an error occurs
+            if (git rev-parse --verify $branchName 2>$null) {
+                git checkout $FromBranch
+                git branch -D $branchName
+                Write-Host "Cleaned up: Switched back to $FromBranch and deleted $branchName locally." -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    end {
+        Write-Host "New-Issue function completed" -ForegroundColor Cyan
+    }
+}
+
+function Get-ProjectType {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $repo = Get-Repo
+    switch ($repo) {
+        "BrokerPortalWeb" { return "BpWeb" }
+        "Avenu20_BP" { return "BpApi" }
+        "Avenu.Organizations" { return "OrgApi" }
+        default { return "Test" }
+    }
+}
+
+
 Export-ModuleMember -Function @(
     'Test-IsGitRepository',
     'Get-GitCurrentBranch',
@@ -773,5 +1183,8 @@ Export-ModuleMember -Function @(
     'Remove-Branches',
     'Get-UntrackedBranches',
     'Get-UnmergedBranches',
-    'Show-Diff'
+    'Show-Diff',
+    'Get-Repo',
+    'New-PR',
+    'New-Issue'
 )

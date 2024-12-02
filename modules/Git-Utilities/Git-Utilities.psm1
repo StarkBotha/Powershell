@@ -1172,6 +1172,217 @@ function Get-ProjectType {
     }
 }
 
+<#
+.SYNOPSIS
+    Shows Git output in Visual Studio Code.
+.DESCRIPTION
+    This function takes Git show output and displays it in Visual Studio Code.
+    It supports showing specific commits or files from specific commits.
+.PARAMETER CommitHash
+    The commit hash to show. If not provided, defaults to HEAD.
+.PARAMETER FileName
+    Optional. The specific file to show from the commit.
+.EXAMPLE
+    Show-GitInVSCode
+    Shows the latest commit (HEAD) in VS Code.
+.EXAMPLE
+    Show-GitInVSCode -CommitHash "abc123"
+    Shows the specific commit in VS Code.
+.EXAMPLE
+    Show-GitInVSCode -CommitHash "abc123" -FileName "README.md"
+    Shows the specific file from the specified commit in VS Code.
+.NOTES
+    Requires Visual Studio Code to be installed and 'code' command to be in PATH.
+#>
+function Show-Git {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$CommitHash = "HEAD",
+
+        [Parameter(Mandatory = $false)]
+        [string]$FileName
+    )
+
+    begin {
+        if (-not (Test-IsGitRepository)) {
+            Write-Error "Not in a Git repository. Aborting."
+            return
+        }
+
+        # Test if VS Code is available
+        if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
+            Write-Error "Visual Studio Code is not available in PATH. Aborting."
+            return
+        }
+    }
+
+    process {
+        try {
+            if ($FileName) {
+                # Show specific file from commit
+                git show "$CommitHash`:$FileName" | code -
+            }
+            else {
+                # Show entire commit
+                git show $CommitHash | code -
+            }
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to show Git content in VS Code."
+            }
+        }
+        catch {
+            Write-Error "An error occurred: $_"
+        }
+    }
+}
+
+function Search-GitHistory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$Pattern,
+        
+        [Parameter(Mandatory = $false)]
+        [int]$LastNCommits = 10
+    )
+
+    begin {
+        if (-not (Test-IsGitRepository)) {
+            throw "Not in a Git repository."
+        }
+    }
+
+    process {
+        try {
+            Write-Host "Retrieving commit history..." -ForegroundColor Cyan
+            $commits = git rev-list --all -n $LastNCommits
+            if (-not $commits) {
+                Write-Warning "No commits found in repository."
+                return
+            }
+
+            Write-Host "Searching through $($commits.Count) commits..." -ForegroundColor Cyan
+
+            foreach ($commit in $commits) {
+                git grep $Pattern $commit 2>$null
+            }
+        }
+        catch {
+            Write-Error "An error occurred: $_"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Searches current state of Git branches for a specific string.
+.DESCRIPTION
+    This function searches through the current state of Git branches for a specific string,
+    only reporting branches that currently contain the string, not historical states.
+.PARAMETER SearchString
+    The exact string to search for in the branches.
+.PARAMETER IncludeRemote
+    If specified, includes remote branches in the search.
+.EXAMPLE
+    Find-BranchesContainingString -SearchString "VITE_BP_API_UPLOAD=/api/v1/user/upload-user-photo"
+    Shows all branches currently containing the specified string.
+#>
+function Find-BranchesContainingString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SearchString,
+        
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeRemote
+    )
+
+    begin {
+        if (-not (Test-IsGitRepository)) {
+            Write-Error "Not in a Git repository. Aborting."
+            return
+        }
+        Write-Verbose "Starting search for string: $SearchString"
+        
+        # Store current branch to return to it later
+        $currentBranch = Get-GitCurrentBranch
+    }
+
+    process {
+        try {
+            # Get all branches
+            $branches = if ($IncludeRemote) {
+                git branch -a | ForEach-Object { $_.Trim() -replace '^[\*\s]+', '' }
+            }
+            else {
+                git branch | ForEach-Object { $_.Trim() -replace '^[\*\s]+', '' }
+            }
+
+            $results = @()
+            
+            foreach ($branch in $branches) {
+                Write-Verbose "Checking branch: $branch"
+                
+                # Skip remote branches if not included
+                if (-not $IncludeRemote -and $branch -like "remotes/*") {
+                    continue
+                }
+
+                # Clean branch name for checkout
+                $cleanBranch = $branch -replace '^remotes/origin/', ''
+                
+                # Checkout branch
+                $null = git checkout $cleanBranch 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Verbose "Failed to checkout branch: $cleanBranch"
+                    continue
+                }
+
+                # Search for string in current branch state
+                $found = git grep -l $SearchString 2>&1
+                if ($found) {
+                    $result = [PSCustomObject]@{
+                        Branch = $cleanBranch
+                        Files  = $found
+                    }
+                    $results += $result
+                }
+            }
+
+            # Display results
+            if ($results.Count -gt 0) {
+                Write-Host "`nString found in the following branches:" -ForegroundColor Cyan
+                foreach ($result in $results) {
+                    Write-Host "`nBranch: " -NoNewline -ForegroundColor Yellow
+                    Write-Host $result.Branch
+                    Write-Host "Present in files:" -ForegroundColor Yellow
+                    $result.Files | ForEach-Object { Write-Host "  - $_" }
+                }
+            }
+            else {
+                Write-Host "`nString not found in any current branch state." -ForegroundColor Yellow
+            }
+
+            return $results
+        }
+        catch {
+            Write-Error "An error occurred: $_"
+        }
+        finally {
+            # Return to original branch
+            if ($currentBranch) {
+                $null = git checkout $currentBranch 2>&1
+            }
+        }
+    }
+
+    end {
+        Write-Verbose "Completed search for string"
+    }
+}
+
 
 Export-ModuleMember -Function @(
     'Test-IsGitRepository',
@@ -1186,5 +1397,8 @@ Export-ModuleMember -Function @(
     'Show-Diff',
     'Get-Repo',
     'New-PR',
-    'New-Issue'
+    'New-Issue',
+    'Show-Git',
+    'Search-GitHistory',
+    'Find-BranchesContainingString'
 )

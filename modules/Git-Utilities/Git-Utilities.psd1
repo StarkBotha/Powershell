@@ -20,7 +20,10 @@
         'Show-Diff',
         'Get-Repo',
         'New-PR',
-        'New-Issue'
+        'New-Issue',
+        'Show-Git',
+        'Search-GitHistory',
+        'Find-BranchesContainingString'
     )
     CmdletsToExport   = @()
     VariablesToExport = '*'
